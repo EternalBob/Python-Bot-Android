@@ -1,65 +1,94 @@
 import os
-import asyncio
+import sys
 import discord
-from discord import app_commands
 from discord.ext import commands
-import variables.config as config
 from keep_alive import keep_alive
 
-TOKEN = getattr(config, 'TOKEN', None) or \
-        getattr(config, 'DISCORD_TOKEN', None) or \
-        getattr(config, 'BOT_TOKEN', None) or \
-        getattr(config, 'token', None) or \
-        os.getenv("DISCORD_TOKEN") or \
-        os.getenv("TOKEN")
+# Load Token from config module or environment variable
+try:
+    from variables import config
+    TOKEN = getattr(config, 'TOKEN', None) or os.getenv("TOKEN")
+except ImportError:
+    TOKEN = os.getenv("TOKEN")
 
-GUILD_ID = 1516263846149357660
-
+# Initialize Bot Intents
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
+# Initialize Bot Instance
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-@bot.tree.command(name="ping", description="Check bot latency")
-async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"🏓 Pong! Latency: {round(bot.latency * 1000)}ms", ephemeral=True)
 
+# Global Interaction Check to enforce command enabling/disabling
+@bot.tree.interaction_check
+async def global_command_check(interaction: discord.Interaction) -> bool:
+    if interaction.command:
+        cmd_name = interaction.command.name
+        # Allow /settings to always remain accessible
+        if cmd_name != "settings":
+            try:
+                from commands.settings import is_command_enabled
+                if not is_command_enabled(cmd_name):
+                    await interaction.response.send_message(
+                        f"❌ The `/{cmd_name}` command is currently disabled in `/settings`.",
+                        ephemeral=True
+                    )
+                    return False
+            except ImportError:
+                pass  # Fallback if settings cog hasn't been loaded
+    return True
+
+
+# Setup Hook: Loads cogs and syncs slash commands on startup
+@bot.event
+async def setup_hook():
+    initial_extensions = [
+        "commands.dyno_logger",
+        "commands.purge",
+        "commands.settings"
+    ]
+
+    for extension in initial_extensions:
+        try:
+            await bot.load_extension(extension)
+            print(f"Loaded extension: {extension}")
+        except Exception as e:
+            print(f"Failed to load extension {extension}: {e}")
+
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash command(s).")
+    except Exception as e:
+        print(f"Failed to sync slash commands: {e}")
+
+
+# Event: Bot Ready Confirmation
 @bot.event
 async def on_ready():
+    print("----------------------------------------")
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    print("Bot is ready and running!")
+    print("----------------------------------------")
 
-    await bot.change_presence(
-        status=discord.Status.online,
-        activity=discord.Game(name="Monitoring Moderation Logs")
-    )
 
-    guild = discord.Object(id=GUILD_ID)
+# Application Entry Point
+def main():
+    # Start Flask Web Server
+    keep_alive()
 
-    bot.tree.copy_global_to(guild=guild)
-    synced = await bot.tree.sync(guild=guild)
+    if not TOKEN:
+        print("CRITICAL ERROR: Discord Bot Token is missing!")
+        print("Please configure TOKEN in variables/config.py or export TOKEN in your environment.")
+        sys.exit(1)
 
-    print(f"✅ Active and synced {len(synced)} command(s) to server {GUILD_ID}.")
+    try:
+        bot.run(TOKEN)
+    except discord.errors.LoginFailure:
+        print("CRITICAL ERROR: Invalid Discord Bot Token supplied.")
+    except Exception as e:
+        print(f"An unexpected error occurred while running the bot: {e}")
 
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    print(f"❌ Error executing /{interaction.command.name if interaction.command else 'unknown'}: {error}")
-    if not interaction.response.is_done():
-        await interaction.response.send_message(f"An error occurred: {error}", ephemeral=True)
-
-async def load_extensions():
-    for ext in ["commands.dyno_logger", "commands.purge"]:
-        try:
-            await bot.load_extension(ext)
-            print(f"Loaded extension: {ext}")
-        except Exception as e:
-            print(f"Failed to load {ext}: {e}")
-
-async def main():
-    async with bot:
-        await load_extensions()
-        keep_alive()
-        await bot.start(TOKEN)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
